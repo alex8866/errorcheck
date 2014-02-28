@@ -1,0 +1,319 @@
+#!/bin/bash
+
+: << EOF
+
+该脚本用来检测所申请的游标是否都释放了
+孔令飞@2012-06-01
+
+EOF
+
+#读取配置文件路径
+CONFPATH=$HOME/etc
+
+#读取配置文件
+#srcpath=$(awk -F= '/srcpath/{print $2}' $CONFPATH/logview.conf)
+
+#设置需要检测文件所在的目录
+#srcpath=$PWD
+#srcpath=/usr/isoa/ISOA.src/FinancialManage
+srcpath=/home/konglf/Test
+
+#配置awk脚本所在的目录
+awkpath=$HOME/etc
+
+sleep_time=0.2
+#建立临时文件
+temp_start=$(mktemp /tmp/tfile.XXXXXX)
+temp_end=$(mktemp /tmp/tfile.XXXXXX)
+temp_file=$(mktemp /tmp/tfile.XXXXXX)
+temp_error=$(mktemp /tmp/tfile.XXXXXX)
+tmpfile=$(mktemp /tmp/tfile.XXXXXX)
+tmpC=$(mktemp /tmp/tfile.XXXXXX)
+tmpCC=$(mktemp /tmp/tfile.XXXXXX)
+
+error_file=$temp_error
+#cat /dev/null > $error_file
+
+binaryfile=
+dec=
+declare -i num=0
+declare -i num2=0
+
+#需要检测的全角符号之间用半角的空格隔开,注意：里面包含了个全角的空格
+#注意：echo_str函数里面的内容请不要乱动，一免出错,错误的具体地方在所给行号周围
+function echo_str()
+{
+	cat << EOF
+｀ ～ １ ！ ２ ＠ ３ ＃ ４ ＄ ５ ％ ６ ＾ ７ ＆ ８ ＊ ９ （ ０ ） － ＿ ＝ ＋ ＼ ｜ ｑ ｗ ｅ ｒ ｔ ｙ ｕ ｉ ｏ ｐ ［ ｛ ］ ｝ ａ ｓ ｄ ｆ ｇ ｈ ｊ ｋ ｌ ； ： ＇ ＂ ｚ ｘ ｃ ｖ ｂ ｎ ｍ ， ＜ ． ＞ ／ ？ 。 ￥ 【 】 　
+EOF
+}
+
+#参数出错处理函数
+function Usage()
+{
+	cat << EOF
+Usage: errcheck [OPTIONS] [FILE]
+[-f] 对单个文件进行检测
+若不带任何参数则检测源码目录中的所有*.pc文件
+EOF
+	exit 1
+}
+
+declare -i stat=0
+declare -i inc=0
+
+#检测源文件中代码部分是否有全角符号错误,注意该检测不能检测出"abc"中"的错误,有其局限性
+#以后可能实现功能，脚本自动替换出错字符
+#像 char a[][10] = {"孔；", "令￥"，"飞＃"}; 中间的全角逗号错误无法检测出来，实际上这类错误通过vi的自动检测功能就能发现(""不配对时颜色会发生变化)，所以这类出错可能性小
+#全角检测准确率90%以上，非常刁钻的错误，该脚本检测不出来，或者检测结果可能会有偏差，使用时请注意
+function shape_check()
+{
+	local file_list=
+	local str=
+	local b='"'
+	if [ -z $1 ];then
+		file_list=$(find $srcpath -name '*.pc')
+	else
+		file_list=$1
+	fi
+
+	IFS=$'\n'
+	for file in $file_list
+	do
+		#初始化变量
+		stat=0
+		cat /dev/null > $tmpC
+		cat /dev/null > $tmpCC
+
+		#出去.pc文件的注释部分,以及字符串中的字符
+		awk -f $awkpath/delCC.awk $file  >> $tmpC
+
+		IFS=$'\n'
+		#for line in $(cat $tmpC | awk '{print $0}')
+		for line in $(cat $tmpC | awk '{print $0}')
+		do
+			echo ${line//$b*$b/} >> $tmpCC
+		done
+
+		IFS=' ':$'\n'
+		for str in $(echo_str)
+		do
+			#去除该字符串左右的空格
+			str=${str// /}
+
+			grep -n $str $tmpCC > /dev/null
+			if grep -n $str $tmpCC > /dev/null;then
+				if [ $stat -eq 0 ];then
+					echo "$$ -->file: $file" >> $error_file
+				fi
+
+				stat=1
+				for nu in $(grep -n $str $tmpCC | awk -F: '{print $1}')
+				do
+					echo "$$ $nu -> $str" >> $error_file
+				done
+				echo >> $tmpfile
+			fi
+			IFS=' ':$'\n'
+		done
+	done
+}
+
+#检测游标是否释放完全
+function cursor_check()
+{
+	local file_list=
+	local str=
+	if [ -z $1 ];then
+		file_list=$(find $srcpath -name '*.pc')
+	else
+		file_list=$1
+	fi
+
+	for file in $file_list
+	do
+		#初始化变量
+		cat /dev/null > $temp_start
+		cat /dev/null > $temp_end
+		str=""
+
+		grep -iw declare $file |awk '{print $4}' > $temp_start &&
+		grep -iw close $file |awk '{print $4}'> $temp_end &&
+
+		stat=0
+		inc=0
+		for dec in $(cat $temp_start)
+		do
+			grep -iw $dec $temp_end > /dev/null
+			if [ $? -ne 0 ];then
+				stat=1
+				str="$str $dec"
+			fi
+			((inc++))
+		done
+
+		if [ $stat -eq 1 ];then
+			echo "$$ -->file: $file" >> $error_file
+			echo "$$ error:游标:$str 没有释放" >> $error_file
+		fi
+
+		inc=0
+		stat2=0
+		str=""
+		for clo in $(cat $temp_end)
+		do
+			clo=${clo%%;}
+			grep -iw  $clo $temp_start > /dev/null
+			if [ $? -ne 0 ];then
+				stat2=1
+				str="$str $clo"
+				if [ $stat -eq 0 -a $inc -eq 0 ];then
+					echo "$$ -->file: $file" >> $error_file
+				fi
+			fi
+			((inc++))
+		done
+
+		if [ $stat2 -eq 1 ];then
+			echo "$$ warning: 释放不存在的游标:$str" >> $error_file
+		fi
+	done
+}
+
+#检测数据库是否断开
+function release_check()
+{
+	local file_list=
+	local str=
+	inc=0
+	if [ -z $1 ];then
+		file_list=$(find $srcpath -name '*.pc')
+	else
+		file_list=$1
+	fi
+
+	for file in $file_list
+	do
+		str="$(echo $file | awk -F/ '{print $NF}' | awk -F. '{print $1}')_"
+
+		row=$(($(grep -n $str $file | awk -F: '{print $1}') - 1))
+		sed "1,$row d" $file > $temp_file
+		ret=$(grep -iw return $temp_file | wc -l) &&
+		rel=$(grep -iw release $temp_file | wc -l) &&
+		if [ $ret -gt $rel ];then
+			echo "$$ -->file: $file" >> $error_file
+			echo "$$ error: 数据库连接可能在$((ret-rel))个地方没有断开" >> $error_file
+		elif [ $ret -lt $rel ];then
+			echo "$$ -->file: $file" >> $error_file
+			echo "$$ warning: 数据库连接可能在$((rel-ret))个地方重复释放" >> $error_file
+		fi
+	done
+}
+
+#显示进度函数
+#次函数有个BUG：当id进程结束了，但系统又用此id发fork了一个新进程，则check_where所监视的进程进度就会出错，
+#当出现这种问题时可先终止脚本，再运行次
+function check_where()
+{
+	local id=$1
+	declare -i m=0
+	local name=$2
+	printf " -->正在检测%s . " $name
+	while true
+	do
+		ps -ef | awk '{print $2}' | grep $id 1>/dev/null
+		if [ $? -ne 0 ];then
+			break;
+		fi
+		
+		sleep $sleep_time
+		if [ $m -gt 23 ];then
+			echo ""
+			printf " -->正在检测%s . " $name
+			m=0
+		fi
+		printf ". "
+		m=$((m+1))
+		done
+		echo
+}
+
+#检测自己开辟的内存是否完全释放
+
+#脚本开始
+if [ $# -eq 0 ];then
+
+	#检测游标
+	echo "$$ 游标检测(start)" >> $error_file
+	cursor_check &
+	id=$!
+	name="游标"
+	check_where $id $name
+	echo "$$ 游标检测(end)" >> $error_file
+	echo "$$" >> $error_file
+
+	#检测数据库连接是否释放
+	echo "$$ 数据库连接检测(start)" >> $error_file
+	release_check &
+	id=$!
+	name="连接"
+	check_where $id $name
+	echo "$$ 数据库连接检测(end)" >> $error_file
+	echo "$$" >> $error_file
+
+	#全角字符检测
+	echo "$$ 全角字符检测(仅供参考)(start)" >> $error_file
+	shape_check &
+	id=$!
+	name="全角"
+	check_where $id $name
+	echo "$$ 全角字符检测(仅供参考)(end)" >> $error_file
+	echo "$$" >> $error_file
+
+elif [ $# -eq 2 ];then
+	while getopts f: opt
+	do
+		case $opt in
+			f)
+
+			#检测游标
+			echo "$$ 游标检测(start)" >> $error_file
+			cursor_check $2 &
+			id=$!
+			name="游标"
+			check_where $id $name
+			echo "$$ 游标检测(end)" >> $error_file
+			echo "$$" >> $error_file
+
+			#数据库连接检测
+			echo "$$ 数据库连接检测(start)" >> $error_file
+			release_check $2 &
+			id=$!
+			name="连接"
+			check_where $id $name
+			echo "$$ 数据库连接检测(end)" >> $error_file
+			echo "$$" >> $error_file
+
+			#全角字符检测
+			echo "$$ 全角字符检测(仅供参考)(start)" >> $error_file
+			shape_check $2 &
+			id=$!
+			name="全角"
+			check_where $id $name
+			echo "$$ 全角字符检测(仅供参考)(end)" >> $error_file
+			echo "$$" >> $error_file
+
+			;;
+			*) Usage
+			;;
+		esac
+	done
+else
+	Usage
+fi
+
+cat $error_file
+rm -f $temp_start $temp_end $temp_error $temp_file $tmpC $tmpCC
+
+exit 0
+
